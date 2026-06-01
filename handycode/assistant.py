@@ -1,8 +1,13 @@
 """
-Основной класс ассистента HandyCode с премиальным интерфейсом
+Основной класс ассистента HandyCode с интерактивным меню
 """
 
-import os, re, json, sys, atexit, signal
+import os
+import re
+import json
+import sys
+import atexit
+import signal
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -18,7 +23,9 @@ try:
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
-    import urllib.request, urllib.error, ssl
+    import urllib.request
+    import urllib.error
+    import ssl
 
 from handycode.config import Config
 from handycode.models import MODELS, get_model_settings
@@ -26,9 +33,127 @@ from handycode.file_manager import FileManager
 from handycode.security import SecurityChecker
 from handycode.utils import (
     Colors, Theme, colorize, print_colored, print_header, print_success,
-    print_error, print_warning, print_info, print_logo, print_install_logo,
+    print_error, print_warning, print_info, print_logo,
     print_divider, print_file_action, print_status, print_section, print_box
 )
+
+
+def interactive_confirm(commands):
+    """
+    Интерактивное меню выбора команд.
+    Управление: ↑/↓ для навигации, ПРОБЕЛ для выбора, ENTER для подтверждения.
+    Возвращает список выбранных команд.
+    """
+    if not commands:
+        return []
+
+    # Настройка для Windows
+    if os.name == 'nt':
+        import msvcrt
+
+        def get_key():
+            key = msvcrt.getch()
+            if key == b'\xe0':  # стрелки
+                key = msvcrt.getch()
+                if key == b'H': return 'up'
+                if key == b'P': return 'down'
+            if key == b'\r': return 'enter'
+            if key == b' ': return 'space'
+            if key == b'a': return 'a'
+            if key == b'A': return 'A'
+            if key == b's': return 's'
+            if key == b'S': return 'S'
+            if key == b'c': return 'c'
+            if key == b'C': return 'C'
+            if key == b'\x1b': return 'escape'
+            return key.decode('utf-8', errors='ignore')
+    else:
+        import tty
+        import termios
+
+        def get_key():
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setraw(fd)
+                key = sys.stdin.read(1)
+                if key == '\x1b':
+                    key += sys.stdin.read(2)
+                    if key == '\x1b[A': return 'up'
+                    if key == '\x1b[B': return 'down'
+                    return 'escape'
+                if key == '\r': return 'enter'
+                if key == ' ': return 'space'
+                return key
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    selected = [True] * len(commands)  # все выбраны по умолчанию
+    current = 0
+
+    def render():
+        # Очищаем предыдущий вывод
+        print(f"\033[{len(commands) + 4}A\033[J", end="")
+
+        print()
+        print(colorize("  ⚡ Команды для выполнения:", Theme.HIGHLIGHT + Colors.BOLD))
+        print(colorize("  ─────────────────────────────────────────────────", Theme.MUTED))
+
+        for i, cmd in enumerate(commands):
+            if i == current:
+                prefix = colorize("  ›", Theme.PRIMARY + Colors.BOLD)
+            else:
+                prefix = "   "
+
+            if selected[i]:
+                checkbox = colorize("◉", Theme.SUCCESS)
+                cmd_color = Theme.SUCCESS
+            else:
+                checkbox = colorize("○", Theme.MUTED)
+                cmd_color = Theme.MUTED
+
+            print(f"{prefix} {checkbox} {colorize(cmd, cmd_color)}")
+
+        print()
+        print(colorize("  Управление:", Theme.MUTED))
+        print(colorize("  ↑↓ Навигация  ПРОБЕЛ Выбрать  A Все  S Пропустить  ENTER Подтвердить", Theme.MUTED))
+
+    # Рендерим первый раз
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    for _ in range(len(commands) + 4):
+        print()
+
+    render()
+
+    while True:
+        key = get_key()
+
+        if key == 'up':
+            current = (current - 1) % len(commands)
+            render()
+        elif key == 'down':
+            current = (current + 1) % len(commands)
+            render()
+        elif key == 'space':
+            selected[current] = not selected[current]
+            render()
+        elif key in ['a', 'A']:
+            selected = [True] * len(commands)
+            render()
+        elif key in ['s', 'S']:
+            selected = [False] * len(commands)
+            render()
+        elif key in ['c', 'C', 'escape']:
+            return []
+        elif key == 'enter':
+            print()
+            return [cmd for cmd, sel in zip(commands, selected) if sel]
+
 
 class HandyCode:
     def __init__(self, project_path, model="deepseek", auto_approve=False, config=None):
@@ -127,7 +252,6 @@ Speak Russian. Write code in English."""
 
     def reset_interrupt(self): self._interrupt_count = 0
 
-    # Потоковая обработка
     def _process_stream_chunk(self, chunk):
         self.stream_buffer += chunk
         while True:
@@ -263,7 +387,6 @@ Speak Russian. Write code in English."""
         }
 
         try:
-            # Заголовок ответа
             print_divider("─", 60, Theme.MUTED)
             print(colorize("  HandyCode", Theme.PRIMARY + Colors.BOLD), end="")
             print(colorize("  ●  ответ", Theme.MUTED))
@@ -274,22 +397,23 @@ Speak Russian. Write code in English."""
             if response:
                 self.conversation_history.append({"role": "assistant", "content": response})
 
-                # Команды
                 if self.pending_commands:
-                    print()
-                    print_section("⚡ Команды (требуют подтверждения)",
-                                  [colorize(cmd, Theme.WARNING) for cmd in self.pending_commands])
                     if self.auto_approve:
-                        choice = 'A'
+                        selected_commands = self.pending_commands
                     else:
-                        print(colorize("  [A] Выполнить все  [S] Пропустить  [C] Отмена", Theme.MUTED))
-                        choice = input(colorize("  > ", Theme.HIGHLIGHT)).strip().upper()
-                    if choice == 'A':
-                        for cmd in self.pending_commands:
+                        selected_commands = interactive_confirm(self.pending_commands)
+
+                    if selected_commands:
+                        print()
+                        print_section("⚡ Выполнение команд", [])
+                        for cmd in selected_commands:
                             if self.security.is_safe_command(cmd):
                                 print_status(f"Выполняется: {cmd}")
                                 self.file_manager.execute_command(cmd)
                                 self.stats["commands_executed"].append(cmd)
+                    else:
+                        print_warning("Команды пропущены")
+
                 self.stats["messages_sent"] += 1
                 return response
         except Exception as e:
@@ -310,7 +434,7 @@ Speak Russian. Write code in English."""
                 "/exit      Выход"
             ], Theme.PRIMARY)
         elif cmd in ['/scan', '/s']:
-            print_section("📁 Проект", self.file_manager.scan_project().split('\n'))
+            print(self.file_manager.scan_project())
         elif cmd in ['/models', '/m']:
             lines = []
             for name, mid in MODELS.items():
