@@ -8,7 +8,6 @@ import json
 import sys
 import atexit
 import signal
-import shutil
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -66,6 +65,7 @@ class HandyCode:
             "files_created": [],
             "files_modified": [],
             "files_deleted": [],
+            "files_read": [],
             "commands_executed": [],
             "start_time": datetime.now()
         }
@@ -75,48 +75,46 @@ class HandyCode:
         self._interrupt_count = 0
 
     def _build_project_context(self):
-        """Собирает контекст проекта"""
-        context = f"\n\n=== PROJECT CONTEXT ===\n"
-        context += f"Working directory: {self.project_path}\n"
-        context += f"OS: {sys.platform}\n"
+        context = f"\n\n=== CURRENT PROJECT ===\n"
+        context += f"Directory: {self.project_path}\n"
 
         try:
             all_files = []
             for ext in self.file_manager.allowed_extensions:
                 all_files.extend(self.project_path.rglob(f"*{ext}"))
-
             all_files.extend(self.project_path.rglob("*"))
-            all_files = list(set(all_files))
 
-            files = [f for f in all_files if f.is_file()
-                     and not any(ex in f.parts for ex in self.file_manager.excluded_dirs)]
+            seen = set()
+            files = []
+            for f in sorted(all_files):
+                if f.is_file() and f not in seen:
+                    rel = str(f.relative_to(self.project_path))
+                    if not any(ex in f.parts for ex in self.file_manager.excluded_dirs):
+                        if not any(rel.startswith(ex) for ex in self.file_manager.excluded_dirs):
+                            files.append(f)
+                            seen.add(f)
 
-            context += f"\nFiles in project ({len(files)} total):\n"
-
-            for file in sorted(files):
+            context += f"\nFiles ({len(files)}):\n"
+            for file in files:
                 try:
                     rel_path = file.relative_to(self.project_path)
                     size = file.stat().st_size
-                    context += f"  - {rel_path} ({self._format_size(size)})\n"
+                    context += f"  {rel_path} ({self._format_size(size)})\n"
                 except:
                     pass
 
-            context += f"\nFile contents (for context):\n"
-            total_size = 0
-            max_total = 30000
-
-            for file in sorted(files):
-                if total_size >= max_total:
+            context += f"\nFile contents:\n"
+            total = 0
+            for file in files:
+                if total > 50000:
                     break
-
                 try:
                     content = file.read_text(encoding='utf-8', errors='ignore')
                     if len(content) > 3000:
                         content = content[:3000] + "\n... (truncated)"
-
                     rel_path = file.relative_to(self.project_path)
                     context += f"\n=== {rel_path} ===\n{content}\n"
-                    total_size += len(content)
+                    total += len(content)
                 except:
                     pass
 
@@ -128,35 +126,69 @@ class HandyCode:
     def _format_size(self, size):
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size < 1024:
-                return f"{size:.0f}{unit}"
+                return f"{size:.1f}{unit}"
             size /= 1024
-        return f"{size:.0f}GB"
+        return f"{size:.1f}TB"
 
     def _get_system_prompt(self):
-        return """You are HandyCode, a powerful AI code assistant with FULL file system access.
+        return """You are HandyCode - a powerful AI assistant for file operations and coding.
 
-YOU CAN:
-- CREATE files: [[CREATE:path/to/file.ext]] content
-- MODIFY files: [[MODIFY:path/to/file.ext]] new content
-- DELETE files: [[DELETE:path/to/file.ext]]
-- READ files: [[READ:path/to/file.ext]]
-- LIST directory: [[LIST:path/to/dir]]
-- EXECUTE commands: [[EXEC:command]]
-- CREATE folders: [[MKDIR:path/to/dir]]
-- COPY files: [[COPY:source]] -> [[CREATE:destination]] (use CREATE with content)
-- MOVE files: [[MOVE:source]] [[CREATE:destination]]
+FILE OPERATIONS - USE EXACT FORMAT:
+To create a file, use [[CREATE:path/to/file]] followed by the complete file content on the next lines, then [[END]] to mark end of file:
+[[CREATE:path/to/file.py]]
+import os
 
-FILES ARE AUTO-CREATED without asking. Only COMMANDS need confirmation.
-You see ALL project files and their contents.
+def main():
+    print("Hello World")
 
-RULES:
-1. CREATE/MODIFY/DELETE/MKDIR happen automatically
-2. EXEC commands need user confirmation
-3. Show COMPLETE file contents
-4. Create ALL needed files
-5. Use the project context
+if __name__ == "__main__":
+    main()
+[[END]]
 
-Speak Russian. Write code in English."""
+To modify a file, use [[MODIFY:path/to/file]] followed by the complete new content, then [[END]]:
+[[MODIFY:path/to/file.py]]
+new complete content here
+[[END]]
+
+To delete a file:
+[[DELETE:path/to/file.py]]
+
+To read a file:
+[[READ:path/to/file.py]]
+
+To list directory:
+[[LIST:path/]]
+
+To run a command (requires confirmation):
+[[EXEC:python script.py]]
+
+CRITICAL RULES:
+1. ALWAYS put [[END]] after file content for CREATE and MODIFY
+2. Show COMPLETE file content between [[CREATE/MODIFY:...]] and [[END]]
+3. NEVER include comments or explanations INSIDE the file content
+4. Only the actual code goes between [[CREATE:...]] and [[END]]
+5. Explain what you're doing BEFORE the [[CREATE:...]] block
+6. Do NOT put your explanations inside [[CREATE:...]] [[END]] blocks
+7. Files are created/modified automatically without asking
+8. Commands (EXEC) require user confirmation
+
+Example of CORRECT format:
+I'll create a Python script for you.
+
+[[CREATE:hello.py]]
+print("Hello World")
+[[END]]
+
+Now you can run it with: python hello.py
+
+Example of WRONG format (DON'T DO THIS):
+[[CREATE:hello.py]]
+Here's your file:
+print("Hello World")
+This file prints hello
+[[END]]
+
+Respond in Russian. Write code in English."""
 
     def _setup_readline(self):
         if not HAS_READLINE:
@@ -180,11 +212,13 @@ Speak Russian. Write code in English."""
     def reset_interrupt(self):
         self._interrupt_count = 0
 
-    def _make_request_stream(self, data):
-        """Отправляет запрос и получает ответ в реальном времени"""
-        if not HAS_REQUESTS:
-            return self._make_request(data)
+    def _make_request_streaming(self, data):
+        if HAS_REQUESTS:
+            return self._make_request_streaming_requests(data)
+        else:
+            return self._make_request_urllib(data)
 
+    def _make_request_streaming_requests(self, data):
         try:
             response = requests.post(
                 self.api_url,
@@ -196,9 +230,9 @@ Speak Russian. Write code in English."""
                 timeout=120,
                 stream=True
             )
+            response.raise_for_status()
 
             full_response = ""
-
             for line in response.iter_lines():
                 if line:
                     line = line.decode('utf-8')
@@ -212,43 +246,63 @@ Speak Russian. Write code in English."""
                                 delta = chunk['choices'][0].get('delta', {})
                                 content = delta.get('content', '')
                                 if content:
+                                    # Показываем только если это не внутри кодового блока
                                     print(content, end="", flush=True)
                                     full_response += content
                         except:
                             continue
-
             print()
             return full_response
-
         except Exception as e:
             print_error(f"API Error: {e}")
             return ""
 
-    def _make_request(self, data):
-        """Обычный запрос без стриминга"""
-        if HAS_REQUESTS:
-            try:
-                response = requests.post(
-                    self.api_url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json=data,
-                    timeout=120
-                )
-                result = response.json()
-                if 'choices' in result and result['choices']:
-                    return result['choices'][0]['message']['content']
-            except Exception as e:
-                print_error(f"API Error: {e}")
-        return ""
+    def _make_request_urllib(self, data):
+        try:
+            json_data = json.dumps({**data, "stream": True}).encode('utf-8')
+            req = urllib.request.Request(
+                self.api_url,
+                data=json_data,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                method='POST'
+            )
+            ctx = ssl.create_default_context()
+
+            full_response = ""
+            with urllib.request.urlopen(req, context=ctx, timeout=120) as response:
+                for line in response:
+                    line = line.decode('utf-8').strip()
+                    if line.startswith('data: '):
+                        data_str = line[6:]
+                        if data_str == '[DONE]':
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            if 'choices' in chunk and chunk['choices']:
+                                delta = chunk['choices'][0].get('delta', {})
+                                content = delta.get('content', '')
+                                if content:
+                                    print(content, end="", flush=True)
+                                    full_response += content
+                        except:
+                            continue
+                print()
+                return full_response
+        except Exception as e:
+            print_error(f"Request error: {e}")
+            return ""
 
     def send_message(self, user_input):
         if user_input.startswith('/'):
             return self._handle_command(user_input)
 
         self.conversation_history.append({"role": "user", "content": user_input})
+
+        if len(self.conversation_history) > 20:
+            self.conversation_history = [self.conversation_history[0]] + self.conversation_history[-19:]
 
         payload = {
             "model": self.current_model,
@@ -259,14 +313,14 @@ Speak Russian. Write code in English."""
 
         try:
             print_info(f"\nDEEPSEEK:")
-            response = self._make_request_stream(payload)
+            response = self._make_request_streaming(payload)
 
             if response:
                 self.conversation_history.append({"role": "assistant", "content": response})
 
                 actions = self._parse_actions(response)
                 if actions:
-                    self._execute_actions_smart(actions)
+                    self._execute_actions(actions)
 
                 self.stats["messages_sent"] += 1
                 return response
@@ -274,24 +328,46 @@ Speak Russian. Write code in English."""
             return print_error(f"Error: {e}")
 
     def _parse_actions(self, response):
-        """Парсит все типы действий"""
         actions = []
 
-        # CREATE
-        for match in re.finditer(r'\[\[CREATE:(.+?)\]\](.*?)(?=\[\[|$)', response, re.DOTALL):
+        # CREATE с [[END]]
+        create_pattern = r'\[\[CREATE:(.+?)\]\](.*?)\[\[END\]\]'
+        for match in re.finditer(create_pattern, response, re.DOTALL):
             path = match.group(1).strip()
             content = match.group(2).strip()
-            content = re.sub(r'^```[\w]*\n?', '', content)
-            content = re.sub(r'\n?```$', '', content)
-            actions.append({'type': 'create', 'path': path, 'content': content})
+            # Убираем маркеры кода если есть
+            content = re.sub(r'^```[\w]*\n', '', content)
+            content = re.sub(r'\n```$', '', content)
+            if content:
+                actions.append({'type': 'create', 'path': path, 'content': content})
 
-        # MODIFY
-        for match in re.finditer(r'\[\[MODIFY:(.+?)\]\](.*?)(?=\[\[|$)', response, re.DOTALL):
+        # CREATE без [[END]] (старый формат, берём до следующего [[ или конца)
+        if not any(a['type'] == 'create' for a in actions):
+            old_create = r'\[\[CREATE:(.+?)\]\](.*?)(?=\[\[|$)'
+            for match in re.finditer(old_create, response, re.DOTALL):
+                path = match.group(1).strip()
+                content = match.group(2).strip()
+                content = re.sub(r'^```[\w]*\n', '', content)
+                content = re.sub(r'\n```$', '', content)
+                # Убираем явно не-кодовые строки
+                lines = content.split('\n')
+                clean_lines = []
+                for line in lines:
+                    if not line.startswith('Here') and not line.startswith('This file') and not line.startswith('Now you'):
+                        clean_lines.append(line)
+                content = '\n'.join(clean_lines).strip()
+                if content:
+                    actions.append({'type': 'create', 'path': path, 'content': content})
+
+        # MODIFY с [[END]]
+        modify_pattern = r'\[\[MODIFY:(.+?)\]\](.*?)\[\[END\]\]'
+        for match in re.finditer(modify_pattern, response, re.DOTALL):
             path = match.group(1).strip()
             content = match.group(2).strip()
-            content = re.sub(r'^```[\w]*\n?', '', content)
-            content = re.sub(r'\n?```$', '', content)
-            actions.append({'type': 'modify', 'path': path, 'content': content})
+            content = re.sub(r'^```[\w]*\n', '', content)
+            content = re.sub(r'\n```$', '', content)
+            if content:
+                actions.append({'type': 'modify', 'path': path, 'content': content})
 
         # DELETE
         for match in re.finditer(r'\[\[DELETE:(.+?)\]\]', response):
@@ -305,46 +381,50 @@ Speak Russian. Write code in English."""
         for match in re.finditer(r'\[\[LIST:(.+?)\]\]', response):
             actions.append({'type': 'list', 'path': match.group(1).strip()})
 
-        # MKDIR
-        for match in re.finditer(r'\[\[MKDIR:(.+?)\]\]', response):
-            actions.append({'type': 'mkdir', 'path': match.group(1).strip()})
-
-        # COPY
-        for match in re.finditer(r'\[\[COPY:(.+?)\]\]', response):
-            actions.append({'type': 'copy', 'path': match.group(1).strip()})
-
-        # MOVE
-        for match in re.finditer(r'\[\[MOVE:(.+?)\]\]', response):
-            actions.append({'type': 'move', 'path': match.group(1).strip()})
-
         # EXEC
         for match in re.finditer(r'\[\[EXEC:(.+?)\]\]', response):
             actions.append({'type': 'exec', 'command': match.group(1).strip()})
 
         return actions
 
-    def _execute_actions_smart(self, actions):
-        """Умное выполнение: файлы авто, команды с подтверждением"""
+    def _execute_actions(self, actions):
         if not actions:
             return
 
-        file_actions = [a for a in actions if a['type'] in ['create', 'modify', 'delete', 'mkdir', 'read', 'list', 'copy', 'move']]
+        file_actions = [a for a in actions if a['type'] in ['create', 'modify', 'delete', 'read', 'list']]
         exec_actions = [a for a in actions if a['type'] == 'exec']
 
-        # Файловые операции выполняем автоматически
+        # Файловые операции - автоматически, показываем только информацию
         if file_actions:
-            print_header("\nAUTO FILE OPERATIONS:")
+            print_header("\nFILE OPERATIONS")
+            for i, action in enumerate(file_actions, 1):
+                if action['type'] == 'create':
+                    lines = action['content'].count('\n') + 1
+                    print(f"  {i}. Created: {action['path']} ({lines} lines)")
+                elif action['type'] == 'modify':
+                    lines = action['content'].count('\n') + 1
+                    print(f"  {i}. Modified: {action['path']} ({lines} lines)")
+                elif action['type'] == 'delete':
+                    print(f"  {i}. Deleted: {action['path']}")
+                elif action['type'] == 'read':
+                    print(f"  {i}. Read: {action['path']}")
+                elif action['type'] == 'list':
+                    print(f"  {i}. Listed: {action['path']}")
+
             for action in file_actions:
                 self._execute_action(action)
 
-        # Команды требуют подтверждения
+        # Команды - требуют подтверждения
         if exec_actions:
-            print_header("\nCOMMANDS TO EXECUTE:")
+            print_header("\nCOMMANDS (confirmation required)")
             for i, action in enumerate(exec_actions, 1):
                 print(f"  {i}. {action['command']}")
 
-            print("\n[A] Execute all  [S] Skip all  [1-N] Select  [C] Cancel")
-            choice = input("> ").strip().upper()
+            if self.auto_approve:
+                choice = 'A'
+            else:
+                print("\n[A] Execute all  [S] Skip  [C] Cancel")
+                choice = input("> ").strip().upper()
 
             if choice == 'A':
                 for action in exec_actions:
@@ -353,151 +433,78 @@ Speak Russian. Write code in English."""
                 print_warning("Skipped")
             elif choice == 'C':
                 print_warning("Cancelled")
-            elif choice.isdigit():
-                idx = int(choice) - 1
-                if 0 <= idx < len(exec_actions):
-                    self._execute_action(exec_actions[idx])
 
     def _execute_action(self, action):
-        """Выполняет одно действие"""
         try:
             if action['type'] == 'create':
-                self.file_manager.create_file(action['path'], action['content'])
-                self.stats["files_created"].append(action['path'])
+                if self.security.is_safe_path(action['path']):
+                    self.file_manager.create_file(action['path'], action['content'])
+                    self.stats["files_created"].append(action['path'])
 
             elif action['type'] == 'modify':
-                self.file_manager.modify_file(action['path'], action['content'])
-                self.stats["files_modified"].append(action['path'])
+                if self.security.is_safe_path(action['path']):
+                    self.file_manager.modify_file(action['path'], action['content'])
+                    self.stats["files_modified"].append(action['path'])
 
             elif action['type'] == 'delete':
-                self._delete_file(action['path'])
-                self.stats["files_deleted"].append(action['path'])
+                if self.security.is_safe_path(action['path']):
+                    self.file_manager.delete_file(action['path'])
+                    self.stats["files_deleted"].append(action['path'])
 
             elif action['type'] == 'read':
-                self._read_file(action['path'])
+                if self.security.is_safe_path(action['path']):
+                    self.file_manager.read_file(action['path'])
+                    self.stats["files_read"].append(action['path'])
 
             elif action['type'] == 'list':
-                self._list_directory(action['path'])
-
-            elif action['type'] == 'mkdir':
-                self._make_directory(action['path'])
+                self.file_manager.list_directory(action['path'])
 
             elif action['type'] == 'exec':
-                self.file_manager.execute_command(action['command'])
-                self.stats["commands_executed"].append(action['command'])
-
-            elif action['type'] == 'copy':
-                self._copy_file(action['path'])
-
-            elif action['type'] == 'move':
-                self._move_file(action['path'])
+                if self.security.is_safe_command(action['command']):
+                    self.file_manager.execute_command(action['command'])
+                    self.stats["commands_executed"].append(action['command'])
 
         except Exception as e:
-            print_error(f"Failed: {e}")
-
-    def _delete_file(self, path):
-        """Удаляет файл"""
-        full_path = self.project_path / path
-        if not self.security.is_safe_path(str(path)):
-            print_error(f"Unsafe: {path}")
-            return
-
-        if full_path.exists():
-            # Бэкап перед удалением
-            backup = full_path.with_suffix(full_path.suffix + '.bak')
-            shutil.copy2(full_path, backup)
-            full_path.unlink()
-            print_success(f"Deleted: {path} (backup: {backup.name})")
-        else:
-            print_warning(f"Not found: {path}")
-
-    def _read_file(self, path):
-        """Читает и показывает файл"""
-        full_path = self.project_path / path
-        if full_path.exists():
-            content = full_path.read_text(encoding='utf-8', errors='ignore')
-            print_header(f"\n=== {path} ===")
-            print(content)
-            print_header("=" * (len(path) + 8))
-        else:
-            print_warning(f"Not found: {path}")
-
-    def _list_directory(self, path):
-        """Показывает содержимое директории"""
-        full_path = self.project_path / path
-        if full_path.exists() and full_path.is_dir():
-            items = sorted(full_path.iterdir())
-            print_header(f"\n=== {path}/ ({len(items)} items) ===")
-            for item in items:
-                if item.is_dir():
-                    print(f"  [DIR]  {item.name}/")
-                else:
-                    size = item.stat().st_size
-                    print(f"  [FILE] {item.name} ({self._format_size(size)})")
-        else:
-            print_warning(f"Not found: {path}")
-
-    def _make_directory(self, path):
-        """Создаёт директорию"""
-        full_path = self.project_path / path
-        full_path.mkdir(parents=True, exist_ok=True)
-        print_success(f"Created dir: {path}")
-
-    def _copy_file(self, source):
-        """Копирует файл (ожидает, что следом будет CREATE)"""
-        print_info(f"Copy source noted: {source}")
-
-    def _move_file(self, source):
-        """Перемещает файл (ожидает, что следом будет CREATE)"""
-        full_path = self.project_path / source
-        if full_path.exists():
-            print_info(f"Move source noted: {source}")
-        else:
-            print_warning(f"Source not found: {source}")
+            print_error(f"Action failed: {e}")
 
     def _handle_command(self, user_input):
-        cmd = user_input.lower().split()[0]
+        parts = user_input.split()
+        cmd = parts[0].lower()
+
         if cmd in ['/help', '/h']:
             print("""
 COMMANDS:
-  /help      Show help
-  /scan      Scan project
-  /models    List models
-  /model N   Switch model
-  /clear     Clear history
-  /save      Save session
-  /stats     Statistics
-  /exit      Exit
+  /help          Show help
+  /scan          Scan project
+  /models        List models
+  /model NAME    Switch model
+  /clear         Clear history
+  /save          Save session
+  /stats         Statistics
+  /exit          Exit
             """)
         elif cmd in ['/scan', '/s']:
             print(self.file_manager.scan_project())
         elif cmd in ['/models', '/m']:
             for name in MODELS:
                 print(f"  {name}")
-        elif cmd in ['/clear', '/c']:
-            self.conversation_history = [self.conversation_history[0]]
-            print_success("Cleared")
-        elif cmd in ['/save']:
-            self.file_manager.save_session(self.conversation_history, self.current_model, self.stats)
-        elif cmd in ['/stats']:
-            duration = datetime.now() - self.stats["start_time"]
-            print(f"Messages: {self.stats['messages_sent']}")
-            print(f"Created: {len(self.stats['files_created'])} files")
-            print(f"Modified: {len(self.stats['files_modified'])} files")
-            print(f"Deleted: {len(self.stats['files_deleted'])} files")
-            print(f"Commands: {len(self.stats['commands_executed'])}")
-            print(f"Duration: {duration}")
-        elif cmd in ['/exit', '/q']:
-            print_success("Goodbye!")
-            os._exit(0)
-        elif cmd in ['/model'] and len(user_input.split()) > 1:
-            model_name = user_input.split()[1]
+        elif cmd in ['/model'] and len(parts) > 1:
+            model_name = parts[1]
             if model_name in MODELS:
                 self.current_model = MODELS[model_name]
                 self.model_settings = get_model_settings(self.current_model)
                 print_success(f"Switched to: {model_name}")
-            else:
-                print_error(f"Unknown model: {model_name}")
+        elif cmd in ['/clear', '/c']:
+            self.conversation_history = [self.conversation_history[0]]
+            print_success("Cleared")
+        elif cmd in ['/stats']:
+            print(f"Messages: {self.stats['messages_sent']}")
+            print(f"Created: {len(self.stats['files_created'])}")
+            print(f"Modified: {len(self.stats['files_modified'])}")
+            print(f"Deleted: {len(self.stats['files_deleted'])}")
+            print(f"Commands: {len(self.stats['commands_executed'])}")
+        elif cmd in ['/exit', '/q']:
+            os._exit(0)
         return ""
 
     def execute_command(self, command):
@@ -508,17 +515,7 @@ COMMANDS:
         print()
         print_info(f"Project: {self.project_path}")
         print_info(f"Model: {self.current_model}")
-
-        try:
-            files = list(self.project_path.rglob("*"))
-            files = [f for f in files if f.is_file()
-                     and not any(ex in f.parts for ex in self.file_manager.excluded_dirs)]
-            visible = [f for f in files if not f.name.startswith('.')]
-            if visible:
-                print_info(f"\nFound {len(visible)} files (AI sees all)")
-        except:
-            pass
-
+        print_info("Files: auto | Commands: confirmation required")
         print_info("/help for commands\n")
 
         while True:

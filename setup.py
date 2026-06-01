@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="handycode",
-    version="2.1.1",
+    version="2.1.2",
     author="AuraTechno",
     description="AI Code Assistant for DeepSeek",
     long_description="HandyCode - AI Code Assistant",
