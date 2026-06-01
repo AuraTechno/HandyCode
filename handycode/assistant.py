@@ -70,6 +70,10 @@ class HandyCode:
             "start_time": datetime.now()
         }
 
+        # Буфер для потокового создания файлов
+        self.stream_buffer = ""
+        self.current_file_action = None
+
         self._setup_readline()
         signal.signal(signal.SIGINT, self._signal_handler)
         self._interrupt_count = 0
@@ -131,64 +135,33 @@ class HandyCode:
         return f"{size:.1f}TB"
 
     def _get_system_prompt(self):
-        return """You are HandyCode - a powerful AI assistant for file operations and coding.
+        return """You are HandyCode - an AI assistant for coding. You can create, modify, delete files and run commands.
 
-FILE OPERATIONS - USE EXACT FORMAT:
-To create a file, use [[CREATE:path/to/file]] followed by the complete file content on the next lines, then [[END]] to mark end of file:
-[[CREATE:path/to/file.py]]
-import os
+CRITICAL: You MUST complete ALL actions in ONE response. If user asks to create AND run a project, do BOTH in the same response.
 
-def main():
-    print("Hello World")
-
-if __name__ == "__main__":
-    main()
+FILE FORMAT - use EXACTLY:
+[[CREATE:filename]]
+code here
 [[END]]
 
-To modify a file, use [[MODIFY:path/to/file]] followed by the complete new content, then [[END]]:
-[[MODIFY:path/to/file.py]]
-new complete content here
+[[MODIFY:filename]]
+new code here
 [[END]]
 
-To delete a file:
-[[DELETE:path/to/file.py]]
+[[DELETE:filename]]
+[[READ:filename]]
+[[LIST:directory/]]
+[[EXEC:command]]
 
-To read a file:
-[[READ:path/to/file.py]]
+RULES:
+1. CREATE and EXEC in SAME response - create files AND run them together
+2. Always use [[END]] to close files
+3. NEVER put comments inside [[CREATE]]...[[END]] blocks
+4. Put explanations BEFORE [[CREATE]] blocks, not inside
+5. When user asks to create and run - do both immediately
+6. Files create automatically, commands need confirmation
 
-To list directory:
-[[LIST:path/]]
-
-To run a command (requires confirmation):
-[[EXEC:python script.py]]
-
-CRITICAL RULES:
-1. ALWAYS put [[END]] after file content for CREATE and MODIFY
-2. Show COMPLETE file content between [[CREATE/MODIFY:...]] and [[END]]
-3. NEVER include comments or explanations INSIDE the file content
-4. Only the actual code goes between [[CREATE:...]] and [[END]]
-5. Explain what you're doing BEFORE the [[CREATE:...]] block
-6. Do NOT put your explanations inside [[CREATE:...]] [[END]] blocks
-7. Files are created/modified automatically without asking
-8. Commands (EXEC) require user confirmation
-
-Example of CORRECT format:
-I'll create a Python script for you.
-
-[[CREATE:hello.py]]
-print("Hello World")
-[[END]]
-
-Now you can run it with: python hello.py
-
-Example of WRONG format (DON'T DO THIS):
-[[CREATE:hello.py]]
-Here's your file:
-print("Hello World")
-This file prints hello
-[[END]]
-
-Respond in Russian. Write code in English."""
+Speak Russian. Write code in English."""
 
     def _setup_readline(self):
         if not HAS_READLINE:
@@ -212,13 +185,71 @@ Respond in Russian. Write code in English."""
     def reset_interrupt(self):
         self._interrupt_count = 0
 
-    def _make_request_streaming(self, data):
-        if HAS_REQUESTS:
-            return self._make_request_streaming_requests(data)
-        else:
-            return self._make_request_urllib(data)
+    def _process_stream_chunk(self, chunk):
+        """Обрабатывает кусок потокового ответа, создавая файлы на лету"""
+        self.stream_buffer += chunk
 
-    def _make_request_streaming_requests(self, data):
+        # Ищем [[CREATE:...]]...[[END]]
+        while True:
+            # Ищем начало CREATE
+            create_match = re.search(r'\[\[CREATE:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
+            if create_match:
+                path = create_match.group(1).strip()
+                content = create_match.group(2).strip()
+                content = re.sub(r'^```[\w]*\n', '', content)
+                content = re.sub(r'\n```$', '', content)
+
+                if content and self.security.is_safe_path(path):
+                    self.file_manager.create_file(path, content)
+                    self.stats["files_created"].append(path)
+                    lines = content.count('\n') + 1
+                    print(f"\n  ✅ Created: {path} ({lines} lines)")
+
+                # Удаляем обработанный блок из буфера
+                self.stream_buffer = self.stream_buffer[create_match.end():]
+            else:
+                break
+
+        # Ищем [[MODIFY:...]]...[[END]]
+        while True:
+            modify_match = re.search(r'\[\[MODIFY:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
+            if modify_match:
+                path = modify_match.group(1).strip()
+                content = modify_match.group(2).strip()
+                content = re.sub(r'^```[\w]*\n', '', content)
+                content = re.sub(r'\n```$', '', content)
+
+                if content and self.security.is_safe_path(path):
+                    self.file_manager.modify_file(path, content)
+                    self.stats["files_modified"].append(path)
+                    lines = content.count('\n') + 1
+                    print(f"\n  ✏️ Modified: {path} ({lines} lines)")
+
+                self.stream_buffer = self.stream_buffer[modify_match.end():]
+            else:
+                break
+
+        # Ищем [[EXEC:...]]
+        while True:
+            exec_match = re.search(r'\[\[EXEC:(.+?)\]\]', self.stream_buffer)
+            if exec_match:
+                command = exec_match.group(1).strip()
+                self.pending_commands.append(command)
+                self.stream_buffer = self.stream_buffer[exec_match.end():]
+            else:
+                break
+
+    def _make_request_streaming(self, data):
+        """Потоковый запрос с обработкой файлов в реальном времени"""
+        self.stream_buffer = ""
+        self.pending_commands = []
+
+        if HAS_REQUESTS:
+            return self._stream_requests(data)
+        else:
+            return self._stream_urllib(data)
+
+    def _stream_requests(self, data):
         try:
             response = requests.post(
                 self.api_url,
@@ -233,6 +264,8 @@ Respond in Russian. Write code in English."""
             response.raise_for_status()
 
             full_response = ""
+            in_code_block = False
+
             for line in response.iter_lines():
                 if line:
                     line = line.decode('utf-8')
@@ -246,18 +279,34 @@ Respond in Russian. Write code in English."""
                                 delta = chunk['choices'][0].get('delta', {})
                                 content = delta.get('content', '')
                                 if content:
-                                    # Показываем только если это не внутри кодового блока
-                                    print(content, end="", flush=True)
                                     full_response += content
+
+                                    # Определяем, нужно ли показывать
+                                    if '[[CREATE:' in full_response[-100:] or '[[MODIFY:' in full_response[-100:]:
+                                        in_code_block = True
+
+                                    if '[[END]]' in full_response[-20:]:
+                                        in_code_block = False
+
+                                    # Показываем только текст вне кодовых блоков
+                                    if not in_code_block:
+                                        # Не показываем маркеры
+                                        display = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '')
+                                        if display.strip():
+                                            print(display, end="", flush=True)
+
+                                    # Обрабатываем буфер для создания файлов
+                                    self._process_stream_chunk(content)
                         except:
                             continue
+
             print()
             return full_response
         except Exception as e:
             print_error(f"API Error: {e}")
             return ""
 
-    def _make_request_urllib(self, data):
+    def _stream_urllib(self, data):
         try:
             json_data = json.dumps({**data, "stream": True}).encode('utf-8')
             req = urllib.request.Request(
@@ -272,6 +321,8 @@ Respond in Russian. Write code in English."""
             ctx = ssl.create_default_context()
 
             full_response = ""
+            in_code_block = False
+
             with urllib.request.urlopen(req, context=ctx, timeout=120) as response:
                 for line in response:
                     line = line.decode('utf-8').strip()
@@ -285,8 +336,20 @@ Respond in Russian. Write code in English."""
                                 delta = chunk['choices'][0].get('delta', {})
                                 content = delta.get('content', '')
                                 if content:
-                                    print(content, end="", flush=True)
                                     full_response += content
+
+                                    if '[[CREATE:' in full_response[-100:] or '[[MODIFY:' in full_response[-100:]:
+                                        in_code_block = True
+
+                                    if '[[END]]' in full_response[-20:]:
+                                        in_code_block = False
+
+                                    if not in_code_block:
+                                        display = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '')
+                                        if display.strip():
+                                            print(display, end="", flush=True)
+
+                                    self._process_stream_chunk(content)
                         except:
                             continue
                 print()
@@ -318,154 +381,30 @@ Respond in Russian. Write code in English."""
             if response:
                 self.conversation_history.append({"role": "assistant", "content": response})
 
-                actions = self._parse_actions(response)
-                if actions:
-                    self._execute_actions(actions)
+                # Выполняем оставшиеся команды
+                if self.pending_commands:
+                    print_header("\nCOMMANDS")
+                    for i, cmd in enumerate(self.pending_commands, 1):
+                        print(f"  {i}. {cmd}")
+
+                    if self.auto_approve:
+                        choice = 'A'
+                    else:
+                        print("\n[A] Execute all  [S] Skip  [C] Cancel")
+                        choice = input("> ").strip().upper()
+
+                    if choice == 'A':
+                        for cmd in self.pending_commands:
+                            if self.security.is_safe_command(cmd):
+                                self.file_manager.execute_command(cmd)
+                                self.stats["commands_executed"].append(cmd)
+                    elif choice == 'S':
+                        print_warning("Skipped")
 
                 self.stats["messages_sent"] += 1
                 return response
         except Exception as e:
             return print_error(f"Error: {e}")
-
-    def _parse_actions(self, response):
-        actions = []
-
-        # CREATE с [[END]]
-        create_pattern = r'\[\[CREATE:(.+?)\]\](.*?)\[\[END\]\]'
-        for match in re.finditer(create_pattern, response, re.DOTALL):
-            path = match.group(1).strip()
-            content = match.group(2).strip()
-            # Убираем маркеры кода если есть
-            content = re.sub(r'^```[\w]*\n', '', content)
-            content = re.sub(r'\n```$', '', content)
-            if content:
-                actions.append({'type': 'create', 'path': path, 'content': content})
-
-        # CREATE без [[END]] (старый формат, берём до следующего [[ или конца)
-        if not any(a['type'] == 'create' for a in actions):
-            old_create = r'\[\[CREATE:(.+?)\]\](.*?)(?=\[\[|$)'
-            for match in re.finditer(old_create, response, re.DOTALL):
-                path = match.group(1).strip()
-                content = match.group(2).strip()
-                content = re.sub(r'^```[\w]*\n', '', content)
-                content = re.sub(r'\n```$', '', content)
-                # Убираем явно не-кодовые строки
-                lines = content.split('\n')
-                clean_lines = []
-                for line in lines:
-                    if not line.startswith('Here') and not line.startswith('This file') and not line.startswith('Now you'):
-                        clean_lines.append(line)
-                content = '\n'.join(clean_lines).strip()
-                if content:
-                    actions.append({'type': 'create', 'path': path, 'content': content})
-
-        # MODIFY с [[END]]
-        modify_pattern = r'\[\[MODIFY:(.+?)\]\](.*?)\[\[END\]\]'
-        for match in re.finditer(modify_pattern, response, re.DOTALL):
-            path = match.group(1).strip()
-            content = match.group(2).strip()
-            content = re.sub(r'^```[\w]*\n', '', content)
-            content = re.sub(r'\n```$', '', content)
-            if content:
-                actions.append({'type': 'modify', 'path': path, 'content': content})
-
-        # DELETE
-        for match in re.finditer(r'\[\[DELETE:(.+?)\]\]', response):
-            actions.append({'type': 'delete', 'path': match.group(1).strip()})
-
-        # READ
-        for match in re.finditer(r'\[\[READ:(.+?)\]\]', response):
-            actions.append({'type': 'read', 'path': match.group(1).strip()})
-
-        # LIST
-        for match in re.finditer(r'\[\[LIST:(.+?)\]\]', response):
-            actions.append({'type': 'list', 'path': match.group(1).strip()})
-
-        # EXEC
-        for match in re.finditer(r'\[\[EXEC:(.+?)\]\]', response):
-            actions.append({'type': 'exec', 'command': match.group(1).strip()})
-
-        return actions
-
-    def _execute_actions(self, actions):
-        if not actions:
-            return
-
-        file_actions = [a for a in actions if a['type'] in ['create', 'modify', 'delete', 'read', 'list']]
-        exec_actions = [a for a in actions if a['type'] == 'exec']
-
-        # Файловые операции - автоматически, показываем только информацию
-        if file_actions:
-            print_header("\nFILE OPERATIONS")
-            for i, action in enumerate(file_actions, 1):
-                if action['type'] == 'create':
-                    lines = action['content'].count('\n') + 1
-                    print(f"  {i}. Created: {action['path']} ({lines} lines)")
-                elif action['type'] == 'modify':
-                    lines = action['content'].count('\n') + 1
-                    print(f"  {i}. Modified: {action['path']} ({lines} lines)")
-                elif action['type'] == 'delete':
-                    print(f"  {i}. Deleted: {action['path']}")
-                elif action['type'] == 'read':
-                    print(f"  {i}. Read: {action['path']}")
-                elif action['type'] == 'list':
-                    print(f"  {i}. Listed: {action['path']}")
-
-            for action in file_actions:
-                self._execute_action(action)
-
-        # Команды - требуют подтверждения
-        if exec_actions:
-            print_header("\nCOMMANDS (confirmation required)")
-            for i, action in enumerate(exec_actions, 1):
-                print(f"  {i}. {action['command']}")
-
-            if self.auto_approve:
-                choice = 'A'
-            else:
-                print("\n[A] Execute all  [S] Skip  [C] Cancel")
-                choice = input("> ").strip().upper()
-
-            if choice == 'A':
-                for action in exec_actions:
-                    self._execute_action(action)
-            elif choice == 'S':
-                print_warning("Skipped")
-            elif choice == 'C':
-                print_warning("Cancelled")
-
-    def _execute_action(self, action):
-        try:
-            if action['type'] == 'create':
-                if self.security.is_safe_path(action['path']):
-                    self.file_manager.create_file(action['path'], action['content'])
-                    self.stats["files_created"].append(action['path'])
-
-            elif action['type'] == 'modify':
-                if self.security.is_safe_path(action['path']):
-                    self.file_manager.modify_file(action['path'], action['content'])
-                    self.stats["files_modified"].append(action['path'])
-
-            elif action['type'] == 'delete':
-                if self.security.is_safe_path(action['path']):
-                    self.file_manager.delete_file(action['path'])
-                    self.stats["files_deleted"].append(action['path'])
-
-            elif action['type'] == 'read':
-                if self.security.is_safe_path(action['path']):
-                    self.file_manager.read_file(action['path'])
-                    self.stats["files_read"].append(action['path'])
-
-            elif action['type'] == 'list':
-                self.file_manager.list_directory(action['path'])
-
-            elif action['type'] == 'exec':
-                if self.security.is_safe_command(action['command']):
-                    self.file_manager.execute_command(action['command'])
-                    self.stats["commands_executed"].append(action['command'])
-
-        except Exception as e:
-            print_error(f"Action failed: {e}")
 
     def _handle_command(self, user_input):
         parts = user_input.split()
@@ -515,7 +454,7 @@ COMMANDS:
         print()
         print_info(f"Project: {self.project_path}")
         print_info(f"Model: {self.current_model}")
-        print_info("Files: auto | Commands: confirmation required")
+        print_info("Files: auto-create in real-time | Commands: confirmation required")
         print_info("/help for commands\n")
 
         while True:
