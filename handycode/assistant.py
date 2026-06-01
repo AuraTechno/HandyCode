@@ -127,16 +127,26 @@ class HandyCode:
         self.project_path = project_path
         self.auto_approve = auto_approve
         self.config = config or Config()
+
+        # Этот вызов запросит ключ если его нет
         self.api_key = self.config.get_api_key()
-        if not self.api_key:
-            raise ValueError("API key not found")
+
+        # Проверяем что ключ не пустой
+        if not self.api_key or len(self.api_key) < 10:
+            print()
+            print("  ❌ API ключ не настроен. HandyCode не может работать без ключа.")
+            print("  Получите ключ на https://openrouter.ai/keys")
+            print("  и добавьте в ~/.handycode/.env:")
+            print("  OPENROUTER_API_KEY=ваш_ключ")
+            print()
+            sys.exit(1)
+
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
         self.current_model = MODELS.get(model, MODELS["deepseek"])
         self.model_settings = get_model_settings(self.current_model)
         self.file_manager = FileManager(self.project_path)
         self.security = SecurityChecker(self.project_path)
 
-        # Получаем список установленных пакетов
         self.installed_packages = self.file_manager.get_installed_packages()
 
         project_context = self._build_project_context()
@@ -151,7 +161,7 @@ class HandyCode:
         }
         self.stream_buffer = ""
         self.pending_commands = []
-        self.command_results = []  # Результаты выполнения команд
+        self.command_results = []
         self._setup_readline()
         signal.signal(signal.SIGINT, self._signal_handler)
         self._interrupt_count = 0
@@ -359,14 +369,29 @@ Speak Russian. Write code in English. Code ONLY inside [[CREATE]]...[[END]]."""
                                 content = delta.get('content', '')
                                 if content:
                                     full_response += content
+
+                                    # Вход в кодовый блок - скрываем всё
                                     if '[[CREATE:' in content or '[[MODIFY:' in content:
                                         in_code = True
+                                        continue
+
+                                    # Выход из кодового блока
                                     if '[[END]]' in content:
                                         in_code = False
-                                    if not in_code:
-                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '').replace('[[INSTALL:', '').replace(']]', '')
-                                        if clean.strip():
-                                            print(clean, end="", flush=True)
+                                        continue
+
+                                    # Если внутри кода - НИЧЕГО не выводим
+                                    if in_code:
+                                        continue
+
+                                    # Очищаем маркеры
+                                    clean = content
+                                    for marker in ['[[CREATE:', '[[MODIFY:', '[[END]]', '[[EXEC:', '[[INSTALL:', '[[DELETE:', '[[READ:', '[[LIST:', ']]']:
+                                        clean = clean.replace(marker, '')
+
+                                    if clean.strip():
+                                        print(clean, end="", flush=True)
+
                                     self._process_stream_chunk(content)
                         except: continue
             print()
@@ -397,14 +422,29 @@ Speak Russian. Write code in English. Code ONLY inside [[CREATE]]...[[END]]."""
                                 content = delta.get('content', '')
                                 if content:
                                     full_response += content
+
+                                    # Вход в кодовый блок - скрываем всё
                                     if '[[CREATE:' in content or '[[MODIFY:' in content:
                                         in_code = True
+                                        continue
+
+                                    # Выход из кодового блока
                                     if '[[END]]' in content:
                                         in_code = False
-                                    if not in_code:
-                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '').replace('[[INSTALL:', '').replace(']]', '')
-                                        if clean.strip():
-                                            print(clean, end="", flush=True)
+                                        continue
+
+                                    # Если внутри кода - НИЧЕГО не выводим
+                                    if in_code:
+                                        continue
+
+                                    # Очищаем маркеры
+                                    clean = content
+                                    for marker in ['[[CREATE:', '[[MODIFY:', '[[END]]', '[[EXEC:', '[[INSTALL:', '[[DELETE:', '[[READ:', '[[LIST:', ']]']:
+                                        clean = clean.replace(marker, '')
+
+                                    if clean.strip():
+                                        print(clean, end="", flush=True)
+
                                     self._process_stream_chunk(content)
                         except: continue
                 print()
@@ -459,7 +499,6 @@ Speak Russian. Write code in English. Code ONLY inside [[CREATE]]...[[END]]."""
                                     "output": output
                                 })
 
-                        # Показываем ошибки
                         errors = [r for r in self.command_results if not r['success']]
                         if errors:
                             print()
