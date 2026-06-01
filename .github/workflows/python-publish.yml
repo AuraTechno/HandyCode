@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:  # Добавьте эту строку для ручного запуска
 
 permissions:
   contents: read
