@@ -14,12 +14,14 @@ from datetime import datetime
 
 try:
     import readline
+
     HAS_READLINE = True
 except ImportError:
     HAS_READLINE = False
 
 try:
     import requests
+
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
@@ -32,8 +34,9 @@ from handycode.models import MODELS, get_model_settings
 from handycode.file_manager import FileManager
 from handycode.security import SecurityChecker
 from handycode.utils import (
-    print_colored, print_header, print_success,
-    print_error, print_warning, print_info, print_logo
+    Colors, print_colored, print_header, print_success,
+    print_error, print_warning, print_info, print_logo,
+    print_divider, print_file_action, print_command, print_status
 )
 
 
@@ -70,9 +73,8 @@ class HandyCode:
             "start_time": datetime.now()
         }
 
-        # Буфер для потокового создания файлов
         self.stream_buffer = ""
-        self.current_file_action = None
+        self.pending_commands = []
 
         self._setup_readline()
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -81,7 +83,6 @@ class HandyCode:
     def _build_project_context(self):
         context = f"\n\n=== CURRENT PROJECT ===\n"
         context += f"Directory: {self.project_path}\n"
-
         try:
             all_files = []
             for ext in self.file_manager.allowed_extensions:
@@ -106,25 +107,8 @@ class HandyCode:
                     context += f"  {rel_path} ({self._format_size(size)})\n"
                 except:
                     pass
-
-            context += f"\nFile contents:\n"
-            total = 0
-            for file in files:
-                if total > 50000:
-                    break
-                try:
-                    content = file.read_text(encoding='utf-8', errors='ignore')
-                    if len(content) > 3000:
-                        content = content[:3000] + "\n... (truncated)"
-                    rel_path = file.relative_to(self.project_path)
-                    context += f"\n=== {rel_path} ===\n{content}\n"
-                    total += len(content)
-                except:
-                    pass
-
-        except Exception as e:
-            context += f"\nError: {e}\n"
-
+        except:
+            pass
         return context
 
     def _format_size(self, size):
@@ -135,33 +119,27 @@ class HandyCode:
         return f"{size:.1f}TB"
 
     def _get_system_prompt(self):
-        return """You are HandyCode - an AI assistant for coding. You can create, modify, delete files and run commands.
+        return """You are HandyCode - AI coding assistant. Create/modify/delete files and run commands.
 
-CRITICAL: You MUST complete ALL actions in ONE response. If user asks to create AND run a project, do BOTH in the same response.
+    FORMAT:
+    [[CREATE:path/file]]
+    code here
+    [[END]]
 
-FILE FORMAT - use EXACTLY:
-[[CREATE:filename]]
-code here
-[[END]]
+    [[MODIFY:path/file]]
+    new code here
+    [[END]]
 
-[[MODIFY:filename]]
-new code here
-[[END]]
+    [[EXEC:command]]
 
-[[DELETE:filename]]
-[[READ:filename]]
-[[LIST:directory/]]
-[[EXEC:command]]
+    RULES:
+    1. CREATE + EXEC in ONE response
+    2. Use [[END]] after file content
+    3. NO comments inside [[CREATE]]...[[END]]
+    4. Explanations BEFORE [[CREATE]] blocks
+    5. Files create automatically, commands need confirmation
 
-RULES:
-1. CREATE and EXEC in SAME response - create files AND run them together
-2. Always use [[END]] to close files
-3. NEVER put comments inside [[CREATE]]...[[END]] blocks
-4. Put explanations BEFORE [[CREATE]] blocks, not inside
-5. When user asks to create and run - do both immediately
-6. Files create automatically, commands need confirmation
-
-Speak Russian. Write code in English."""
+    Speak Russian. Write code in English."""
 
     def _setup_readline(self):
         if not HAS_READLINE:
@@ -178,7 +156,7 @@ Speak Russian. Write code in English."""
     def _signal_handler(self, sig, frame):
         self._interrupt_count += 1
         if self._interrupt_count == 1:
-            print("\n\nPress Ctrl+C again to exit")
+            print("\n\n  ⚠ Press Ctrl+C again to exit")
         else:
             os._exit(0)
 
@@ -186,16 +164,14 @@ Speak Russian. Write code in English."""
         self._interrupt_count = 0
 
     def _process_stream_chunk(self, chunk):
-        """Обрабатывает кусок потокового ответа, создавая файлы на лету"""
         self.stream_buffer += chunk
 
-        # Ищем [[CREATE:...]]...[[END]]
+        # CREATE файлы в реальном времени
         while True:
-            # Ищем начало CREATE
-            create_match = re.search(r'\[\[CREATE:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
-            if create_match:
-                path = create_match.group(1).strip()
-                content = create_match.group(2).strip()
+            match = re.search(r'\[\[CREATE:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
+            if match:
+                path = match.group(1).strip()
+                content = match.group(2).strip()
                 content = re.sub(r'^```[\w]*\n', '', content)
                 content = re.sub(r'\n```$', '', content)
 
@@ -203,19 +179,18 @@ Speak Russian. Write code in English."""
                     self.file_manager.create_file(path, content)
                     self.stats["files_created"].append(path)
                     lines = content.count('\n') + 1
-                    print(f"\n  ✅ Created: {path} ({lines} lines)")
+                    print_file_action('create', path, f"({lines} lines)")
 
-                # Удаляем обработанный блок из буфера
-                self.stream_buffer = self.stream_buffer[create_match.end():]
+                self.stream_buffer = self.stream_buffer[match.end():]
             else:
                 break
 
-        # Ищем [[MODIFY:...]]...[[END]]
+        # MODIFY файлы
         while True:
-            modify_match = re.search(r'\[\[MODIFY:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
-            if modify_match:
-                path = modify_match.group(1).strip()
-                content = modify_match.group(2).strip()
+            match = re.search(r'\[\[MODIFY:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
+            if match:
+                path = match.group(1).strip()
+                content = match.group(2).strip()
                 content = re.sub(r'^```[\w]*\n', '', content)
                 content = re.sub(r'\n```$', '', content)
 
@@ -223,24 +198,22 @@ Speak Russian. Write code in English."""
                     self.file_manager.modify_file(path, content)
                     self.stats["files_modified"].append(path)
                     lines = content.count('\n') + 1
-                    print(f"\n  ✏️ Modified: {path} ({lines} lines)")
+                    print_file_action('modify', path, f"({lines} lines)")
 
-                self.stream_buffer = self.stream_buffer[modify_match.end():]
+                self.stream_buffer = self.stream_buffer[match.end():]
             else:
                 break
 
-        # Ищем [[EXEC:...]]
+        # EXEC команды
         while True:
-            exec_match = re.search(r'\[\[EXEC:(.+?)\]\]', self.stream_buffer)
-            if exec_match:
-                command = exec_match.group(1).strip()
-                self.pending_commands.append(command)
-                self.stream_buffer = self.stream_buffer[exec_match.end():]
+            match = re.search(r'\[\[EXEC:(.+?)\]\]', self.stream_buffer)
+            if match:
+                self.pending_commands.append(match.group(1).strip())
+                self.stream_buffer = self.stream_buffer[match.end():]
             else:
                 break
 
     def _make_request_streaming(self, data):
-        """Потоковый запрос с обработкой файлов в реальном времени"""
         self.stream_buffer = ""
         self.pending_commands = []
 
@@ -264,7 +237,7 @@ Speak Russian. Write code in English."""
             response.raise_for_status()
 
             full_response = ""
-            in_code_block = False
+            in_code = False
 
             for line in response.iter_lines():
                 if line:
@@ -281,21 +254,17 @@ Speak Russian. Write code in English."""
                                 if content:
                                     full_response += content
 
-                                    # Определяем, нужно ли показывать
-                                    if '[[CREATE:' in full_response[-100:] or '[[MODIFY:' in full_response[-100:]:
-                                        in_code_block = True
+                                    if '[[CREATE:' in content or '[[MODIFY:' in content:
+                                        in_code = True
+                                    if '[[END]]' in content:
+                                        in_code = False
 
-                                    if '[[END]]' in full_response[-20:]:
-                                        in_code_block = False
+                                    if not in_code:
+                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace(
+                                            '[[END]]', '').replace('[[EXEC:', '').replace(']]', '')
+                                        if clean.strip():
+                                            print(clean, end="", flush=True)
 
-                                    # Показываем только текст вне кодовых блоков
-                                    if not in_code_block:
-                                        # Не показываем маркеры
-                                        display = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '')
-                                        if display.strip():
-                                            print(display, end="", flush=True)
-
-                                    # Обрабатываем буфер для создания файлов
                                     self._process_stream_chunk(content)
                         except:
                             continue
@@ -321,7 +290,7 @@ Speak Russian. Write code in English."""
             ctx = ssl.create_default_context()
 
             full_response = ""
-            in_code_block = False
+            in_code = False
 
             with urllib.request.urlopen(req, context=ctx, timeout=120) as response:
                 for line in response:
@@ -338,16 +307,16 @@ Speak Russian. Write code in English."""
                                 if content:
                                     full_response += content
 
-                                    if '[[CREATE:' in full_response[-100:] or '[[MODIFY:' in full_response[-100:]:
-                                        in_code_block = True
+                                    if '[[CREATE:' in content or '[[MODIFY:' in content:
+                                        in_code = True
+                                    if '[[END]]' in content:
+                                        in_code = False
 
-                                    if '[[END]]' in full_response[-20:]:
-                                        in_code_block = False
-
-                                    if not in_code_block:
-                                        display = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '')
-                                        if display.strip():
-                                            print(display, end="", flush=True)
+                                    if not in_code:
+                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace(
+                                            '[[END]]', '').replace('[[EXEC:', '').replace(']]', '')
+                                        if clean.strip():
+                                            print(clean, end="", flush=True)
 
                                     self._process_stream_chunk(content)
                         except:
@@ -375,31 +344,37 @@ Speak Russian. Write code in English."""
         }
 
         try:
-            print_info(f"\nDEEPSEEK:")
+            print_divider("─", 60, Colors.BRIGHT_BLACK)
+            print(colorize("  HandyCode", Colors.BRIGHT_CYAN + Colors.BOLD))
+            print_divider("─", 60, Colors.BRIGHT_BLACK)
+
             response = self._make_request_streaming(payload)
 
             if response:
                 self.conversation_history.append({"role": "assistant", "content": response})
 
-                # Выполняем оставшиеся команды
                 if self.pending_commands:
-                    print_header("\nCOMMANDS")
+                    print()
+                    print_divider("─", 60, Colors.BRIGHT_BLACK)
+                    print(colorize("  ⚡ Commands (confirmation required):", Colors.YELLOW))
                     for i, cmd in enumerate(self.pending_commands, 1):
-                        print(f"  {i}. {cmd}")
+                        print_command(cmd, i)
 
                     if self.auto_approve:
                         choice = 'A'
                     else:
-                        print("\n[A] Execute all  [S] Skip  [C] Cancel")
-                        choice = input("> ").strip().upper()
+                        print()
+                        print(colorize(f"  {Colors.BRIGHT_BLACK}[A] Execute all  [S] Skip  [C] Cancel{Colors.RESET}",
+                                       Colors.BRIGHT_BLACK))
+                        choice = input(colorize("  > ", Colors.WHITE)).strip().upper()
 
                     if choice == 'A':
+                        print()
                         for cmd in self.pending_commands:
                             if self.security.is_safe_command(cmd):
+                                print_status(f"Running: {cmd}")
                                 self.file_manager.execute_command(cmd)
                                 self.stats["commands_executed"].append(cmd)
-                    elif choice == 'S':
-                        print_warning("Skipped")
 
                 self.stats["messages_sent"] += 1
                 return response
@@ -411,38 +386,50 @@ Speak Russian. Write code in English."""
         cmd = parts[0].lower()
 
         if cmd in ['/help', '/h']:
-            print("""
-COMMANDS:
-  /help          Show help
-  /scan          Scan project
-  /models        List models
-  /model NAME    Switch model
-  /clear         Clear history
-  /save          Save session
-  /stats         Statistics
-  /exit          Exit
-            """)
+            print()
+            print(colorize("  Commands:", Colors.BRIGHT_CYAN + Colors.BOLD))
+            print_divider("─", 40, Colors.BRIGHT_BLACK)
+            print(colorize("  /help          Show this help", Colors.WHITE))
+            print(colorize("  /scan          Scan project files", Colors.WHITE))
+            print(colorize("  /models        List AI models", Colors.WHITE))
+            print(colorize("  /model NAME    Switch model", Colors.WHITE))
+            print(colorize("  /clear         Clear chat history", Colors.WHITE))
+            print(colorize("  /save          Save session to file", Colors.WHITE))
+            print(colorize("  /stats         Show statistics", Colors.WHITE))
+            print(colorize("  /exit          Exit program", Colors.WHITE))
+            print()
         elif cmd in ['/scan', '/s']:
+            print()
+            print(colorize("  Project Files:", Colors.BRIGHT_CYAN + Colors.BOLD))
+            print_divider("─", 40, Colors.BRIGHT_BLACK)
             print(self.file_manager.scan_project())
         elif cmd in ['/models', '/m']:
+            print()
+            print(colorize("  Available Models:", Colors.BRIGHT_CYAN + Colors.BOLD))
+            print_divider("─", 40, Colors.BRIGHT_BLACK)
             for name in MODELS:
-                print(f"  {name}")
+                marker = colorize(" (current)", Colors.GREEN) if MODELS[name] == self.current_model else ""
+                print(f"  • {name}{marker}")
         elif cmd in ['/model'] and len(parts) > 1:
             model_name = parts[1]
             if model_name in MODELS:
                 self.current_model = MODELS[model_name]
                 self.model_settings = get_model_settings(self.current_model)
-                print_success(f"Switched to: {model_name}")
+                print_success(f"Switched to {model_name}")
         elif cmd in ['/clear', '/c']:
             self.conversation_history = [self.conversation_history[0]]
-            print_success("Cleared")
+            print_success("Chat history cleared")
         elif cmd in ['/stats']:
-            print(f"Messages: {self.stats['messages_sent']}")
-            print(f"Created: {len(self.stats['files_created'])}")
-            print(f"Modified: {len(self.stats['files_modified'])}")
-            print(f"Deleted: {len(self.stats['files_deleted'])}")
-            print(f"Commands: {len(self.stats['commands_executed'])}")
+            print()
+            print(colorize("  Session Stats:", Colors.BRIGHT_CYAN + Colors.BOLD))
+            print_divider("─", 40, Colors.BRIGHT_BLACK)
+            print(colorize(f"  Messages: {self.stats['messages_sent']}", Colors.WHITE))
+            print(colorize(f"  Created: {len(self.stats['files_created'])} files", Colors.GREEN))
+            print(colorize(f"  Modified: {len(self.stats['files_modified'])} files", Colors.YELLOW))
+            print(colorize(f"  Deleted: {len(self.stats['files_deleted'])} files", Colors.RED))
+            print(colorize(f"  Commands: {len(self.stats['commands_executed'])}", Colors.CYAN))
         elif cmd in ['/exit', '/q']:
+            print_success("Goodbye!")
             os._exit(0)
         return ""
 
@@ -451,19 +438,32 @@ COMMANDS:
 
     def run(self):
         print_logo()
+        print_divider("─", 60, Colors.BRIGHT_BLACK)
+        print(colorize(f"  📁 Project: {self.project_path}", Colors.WHITE))
+        print(colorize(f"  🤖 Model: {self.current_model}", Colors.WHITE))
+        print(colorize(f"  {Colors.BRIGHT_BLACK}/help for commands{Colors.RESET}", Colors.BRIGHT_BLACK))
+        print_divider("─", 60, Colors.BRIGHT_BLACK)
         print()
-        print_info(f"Project: {self.project_path}")
-        print_info(f"Model: {self.current_model}")
-        print_info("Files: auto-create in real-time | Commands: confirmation required")
-        print_info("/help for commands\n")
 
         while True:
             try:
                 self.reset_interrupt()
-                user_input = input("> ").strip()
+                user_input = input(colorize("  ❯ ", Colors.BRIGHT_CYAN + Colors.BOLD)).strip()
                 if user_input:
                     self.send_message(user_input)
             except KeyboardInterrupt:
                 continue
             except EOFError:
                 break
+
+
+# Добавляем colorize как глобальную функцию для удобства
+def colorize(text, color):
+    if supports_color():
+        return f"{color}{text}{Colors.RESET}"
+    return text
+
+
+def supports_color():
+    from handycode.utils import supports_color as sc
+    return sc()
