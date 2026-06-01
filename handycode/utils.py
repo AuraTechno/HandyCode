@@ -4,16 +4,15 @@
 
 import sys
 import os
+import time
+import threading
 
 class Colors:
-    # Базовые
     RESET = '\033[0m'
     BOLD = '\033[1m'
     DIM = '\033[2m'
     ITALIC = '\033[3m'
-    UNDERLINE = '\033[4m'
 
-    # Стандартные мягкие тона (не яркие)
     BLACK = '\033[30m'
     RED = '\033[31m'
     GREEN = '\033[32m'
@@ -23,7 +22,6 @@ class Colors:
     CYAN = '\033[36m'
     WHITE = '\033[37m'
 
-    # Яркие (для акцентов)
     BRIGHT_BLACK = '\033[90m'
     BRIGHT_RED = '\033[91m'
     BRIGHT_GREEN = '\033[92m'
@@ -33,16 +31,15 @@ class Colors:
     BRIGHT_CYAN = '\033[96m'
     BRIGHT_WHITE = '\033[97m'
 
-# Тема HandyCode (премиальная пастель)
 class Theme:
-    PRIMARY = Colors.CYAN          # мягкий циан
-    SECONDARY = Colors.BLUE        # спокойный синий
-    ACCENT = Colors.MAGENTA        # акцент
+    PRIMARY = Colors.CYAN
+    SECONDARY = Colors.BLUE
+    ACCENT = Colors.MAGENTA
     SUCCESS = Colors.GREEN
     WARNING = Colors.YELLOW
     ERROR = Colors.RED
     TEXT = Colors.WHITE
-    MUTED = Colors.BRIGHT_BLACK    # серый для подписей
+    MUTED = Colors.BRIGHT_BLACK
     HIGHLIGHT = Colors.BRIGHT_WHITE
 
 def supports_color():
@@ -84,27 +81,10 @@ def print_logo():
     from .logo import get_logo
     print(get_logo())
 
-def print_install_logo():
-    from .logo import get_install_logo
-    print(get_install_logo())
-
-def truncate(text, max_length=100):
-    if len(text) <= max_length:
-        return text
-    return text[:max_length-3] + "..."
-
-def format_size(size_bytes):
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} TB"
-
 def print_divider(char="─", width=60, color=Theme.MUTED):
     print(colorize(char * width, color))
 
 def print_box(lines, color=Theme.PRIMARY):
-    """Рамка вокруг списка строк"""
     max_len = max((len(line) for line in lines), default=0) + 2
     top = "┌" + "─" * max_len + "┐"
     bottom = "└" + "─" * max_len + "┘"
@@ -114,7 +94,6 @@ def print_box(lines, color=Theme.PRIMARY):
     print(colorize(bottom, color))
 
 def print_section(title, content_lines):
-    """Секция с заголовком и содержимым"""
     print_divider("─", 50, Theme.MUTED)
     print(colorize(f"  {title}", Theme.HIGHLIGHT + Colors.BOLD))
     for line in content_lines:
@@ -138,3 +117,49 @@ def print_file_action(action, path, details=""):
     if details:
         msg += f" {colorize(details, Theme.MUTED)}"
     print(colorize(msg, color))
+
+class Spinner:
+    """Анимированный спиннер"""
+    def __init__(self, message="Загрузка"):
+        self.message = message
+        self.running = False
+        self.thread = None
+        self.chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.start()
+
+    def stop(self, final_message=None):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        sys.stdout.write('\r' + ' ' * (len(self.message) + 10) + '\r')
+        sys.stdout.flush()
+        if final_message:
+            print(final_message)
+
+    def _spin(self):
+        i = 0
+        while self.running:
+            char = self.chars[i % len(self.chars)]
+            sys.stdout.write(f'\r  {char} {self.message}...')
+            sys.stdout.flush()
+            time.sleep(0.1)
+            i += 1
+
+def print_package_status(package, action, success=True):
+    """Красивое отображение установки пакета"""
+    icon = '✔' if success else '✘'
+    color = Theme.SUCCESS if success else Theme.ERROR
+    print(colorize(f"    {icon} {package}", color))
+
+def print_command_result(command, success, output=None):
+    """Отображение результата команды"""
+    icon = '✔' if success else '✘'
+    color = Theme.SUCCESS if success else Theme.ERROR
+    print(colorize(f"  {icon} {command[:60]}", color))
+    if output and not success:
+        for line in output.strip().split('\n')[:5]:
+            print(colorize(f"    {line}", Theme.MUTED))

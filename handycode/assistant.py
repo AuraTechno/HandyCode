@@ -1,5 +1,5 @@
 """
-Основной класс ассистента HandyCode с интерактивным меню
+Основной класс ассистента HandyCode
 """
 
 import os
@@ -34,43 +34,33 @@ from handycode.security import SecurityChecker
 from handycode.utils import (
     Colors, Theme, colorize, print_colored, print_header, print_success,
     print_error, print_warning, print_info, print_logo,
-    print_divider, print_file_action, print_status, print_section, print_box
+    print_divider, print_file_action, print_status, print_section, print_box,
+    Spinner, print_package_status
 )
 
 
 def interactive_confirm(commands):
-    """
-    Интерактивное меню выбора команд.
-    Управление: ↑/↓ для навигации, ПРОБЕЛ для выбора, ENTER для подтверждения.
-    Возвращает список выбранных команд.
-    """
+    """Интерактивное меню выбора команд"""
     if not commands:
         return []
 
-    # Настройка для Windows
     if os.name == 'nt':
         import msvcrt
-
         def get_key():
             key = msvcrt.getch()
-            if key == b'\xe0':  # стрелки
+            if key == b'\xe0':
                 key = msvcrt.getch()
                 if key == b'H': return 'up'
                 if key == b'P': return 'down'
             if key == b'\r': return 'enter'
             if key == b' ': return 'space'
-            if key == b'a': return 'a'
-            if key == b'A': return 'A'
-            if key == b's': return 's'
-            if key == b'S': return 'S'
-            if key == b'c': return 'c'
-            if key == b'C': return 'C'
+            if key in [b'a', b'A']: return 'a'
+            if key in [b's', b'S']: return 's'
+            if key in [b'c', b'C']: return 'c'
             if key == b'\x1b': return 'escape'
             return key.decode('utf-8', errors='ignore')
     else:
-        import tty
-        import termios
-
+        import tty, termios
         def get_key():
             fd = sys.stdin.fileno()
             old = termios.tcgetattr(fd)
@@ -88,51 +78,28 @@ def interactive_confirm(commands):
             finally:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-    selected = [True] * len(commands)  # все выбраны по умолчанию
+    selected = [True] * len(commands)
     current = 0
 
     def render():
-        # Очищаем предыдущий вывод
         print(f"\033[{len(commands) + 4}A\033[J", end="")
-
         print()
         print(colorize("  ⚡ Команды для выполнения:", Theme.HIGHLIGHT + Colors.BOLD))
         print(colorize("  ─────────────────────────────────────────────────", Theme.MUTED))
-
         for i, cmd in enumerate(commands):
-            if i == current:
-                prefix = colorize("  ›", Theme.PRIMARY + Colors.BOLD)
-            else:
-                prefix = "   "
-
-            if selected[i]:
-                checkbox = colorize("◉", Theme.SUCCESS)
-                cmd_color = Theme.SUCCESS
-            else:
-                checkbox = colorize("○", Theme.MUTED)
-                cmd_color = Theme.MUTED
-
+            prefix = colorize("  ›", Theme.PRIMARY + Colors.BOLD) if i == current else "   "
+            checkbox = colorize("◉", Theme.SUCCESS) if selected[i] else colorize("○", Theme.MUTED)
+            cmd_color = Theme.SUCCESS if selected[i] else Theme.MUTED
             print(f"{prefix} {checkbox} {colorize(cmd, cmd_color)}")
-
         print()
-        print(colorize("  Управление:", Theme.MUTED))
-        print(colorize("  ↑↓ Навигация  ПРОБЕЛ Выбрать  A Все  S Пропустить  ENTER Подтвердить", Theme.MUTED))
+        print(colorize("  ↑↓ Навигация  ПРОБЕЛ Выбрать  A Все  S Пропустить  ENTER Подтвердить  C Отмена", Theme.MUTED))
 
-    # Рендерим первый раз
-    print()
-    print()
-    print()
-    print()
-    print()
-    print()
-    for _ in range(len(commands) + 4):
+    for _ in range(len(commands) + 5):
         print()
-
     render()
 
     while True:
         key = get_key()
-
         if key == 'up':
             current = (current - 1) % len(commands)
             render()
@@ -168,7 +135,12 @@ class HandyCode:
         self.model_settings = get_model_settings(self.current_model)
         self.file_manager = FileManager(self.project_path)
         self.security = SecurityChecker(self.project_path)
+
+        # Получаем список установленных пакетов
+        self.installed_packages = self.file_manager.get_installed_packages()
+
         project_context = self._build_project_context()
+
         self.conversation_history = [
             {"role": "system", "content": self._get_system_prompt() + project_context}
         ]
@@ -179,12 +151,21 @@ class HandyCode:
         }
         self.stream_buffer = ""
         self.pending_commands = []
+        self.command_results = []  # Результаты выполнения команд
         self._setup_readline()
         signal.signal(signal.SIGINT, self._signal_handler)
         self._interrupt_count = 0
 
     def _build_project_context(self):
         context = f"\n\n=== CURRENT PROJECT ===\nDirectory: {self.project_path}\n"
+        context += f"\n=== INSTALLED PACKAGES ===\n"
+        if self.installed_packages:
+            context += ", ".join(self.installed_packages[:50])
+            if len(self.installed_packages) > 50:
+                context += f"\n... and {len(self.installed_packages) - 50} more"
+        else:
+            context += "No packages detected"
+
         try:
             all_files = []
             for ext in self.file_manager.allowed_extensions:
@@ -199,12 +180,25 @@ class HandyCode:
                         if not any(rel.startswith(ex) for ex in self.file_manager.excluded_dirs):
                             files.append(f)
                             seen.add(f)
-            context += f"\nFiles ({len(files)}):\n"
+            context += f"\n\n=== PROJECT FILES ({len(files)}) ===\n"
             for file in files:
                 try:
                     rel_path = file.relative_to(self.project_path)
                     size = file.stat().st_size
                     context += f"  {rel_path} ({self._format_size(size)})\n"
+                except: pass
+
+            context += f"\n=== FILE CONTENTS ===\n"
+            total = 0
+            for file in files:
+                if total > 50000: break
+                try:
+                    content = file.read_text(encoding='utf-8', errors='ignore')
+                    if len(content) > 3000:
+                        content = content[:3000] + "\n... (truncated)"
+                    rel_path = file.relative_to(self.project_path)
+                    context += f"\n=== {rel_path} ===\n{content}\n"
+                    total += len(content)
                 except: pass
         except: pass
         return context
@@ -216,22 +210,50 @@ class HandyCode:
         return f"{size:.1f}TB"
 
     def _get_system_prompt(self):
-        return """You are HandyCode - AI coding assistant. Create/modify/delete files and run commands.
-FORMAT:
-[[CREATE:path/file]]
+        return """You are HandyCode - AI coding assistant.
+
+CAPABILITIES:
+- Create, modify, delete files
+- Run shell commands
+- Install Python packages via pip
+- Analyze code and errors
+- See installed packages and project files
+
+PACKAGE MANAGEMENT:
+- Check INSTALLED PACKAGES section before suggesting imports
+- If a package is needed but not installed, use [[INSTALL:package_name]]
+- Example: [[INSTALL:fastapi]] [[INSTALL:uvicorn]]
+
+FILE FORMAT:
+[[CREATE:path/file.py]]
 code here
 [[END]]
-[[MODIFY:path/file]]
+
+[[MODIFY:path/file.py]]
 new code here
 [[END]]
+
+[[DELETE:path/file.py]]
+[[READ:path/file.py]]
+[[LIST:directory/]]
 [[EXEC:command]]
-RULES:
-1. CREATE + EXEC in ONE response
-2. Use [[END]] after file content
-3. NO comments inside [[CREATE]]...[[END]]
-4. Explanations BEFORE [[CREATE]] blocks
-5. Files create automatically, commands need confirmation
-Speak Russian. Write code in English."""
+[[INSTALL:package_name]]
+
+CRITICAL RULES:
+1. ALWAYS check if required packages are installed before using them
+2. Install missing packages with [[INSTALL:...]]
+3. CREATE files + INSTALL packages + EXEC commands in ONE response
+4. Use [[END]] to close file blocks
+5. NO comments or explanations inside [[CREATE]]...[[END]] - ONLY CODE
+6. Put ALL explanations BEFORE [[CREATE]] blocks
+7. After EXEC, I will show you any errors
+
+ERROR HANDLING:
+- After running commands, I'll show you the output
+- If there are errors, I'll show them to you
+- You can then fix the files and re-run
+
+Speak Russian. Write code in English. Code ONLY inside [[CREATE]]...[[END]]."""
 
     def _setup_readline(self):
         if not HAS_READLINE: return
@@ -254,6 +276,8 @@ Speak Russian. Write code in English."""
 
     def _process_stream_chunk(self, chunk):
         self.stream_buffer += chunk
+
+        # CREATE с анимацией
         while True:
             match = re.search(r'\[\[CREATE:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
             if match:
@@ -262,11 +286,15 @@ Speak Russian. Write code in English."""
                 content = re.sub(r'^```[\w]*\n', '', content)
                 content = re.sub(r'\n```$', '', content)
                 if content and self.security.is_safe_path(path):
+                    spinner = Spinner(f"Создание {path}")
+                    spinner.start()
                     self.file_manager.create_file(path, content)
+                    spinner.stop(f"  ✔ {path} ({content.count(chr(10))+1} строк)")
                     self.stats["files_created"].append(path)
-                    print_file_action('create', path, f"({content.count(chr(10))+1} lines)")
                 self.stream_buffer = self.stream_buffer[match.end():]
             else: break
+
+        # MODIFY
         while True:
             match = re.search(r'\[\[MODIFY:(.+?)\]\](.*?)\[\[END\]\]', self.stream_buffer, re.DOTALL)
             if match:
@@ -275,11 +303,25 @@ Speak Russian. Write code in English."""
                 content = re.sub(r'^```[\w]*\n', '', content)
                 content = re.sub(r'\n```$', '', content)
                 if content and self.security.is_safe_path(path):
+                    spinner = Spinner(f"Изменение {path}")
+                    spinner.start()
                     self.file_manager.modify_file(path, content)
+                    spinner.stop(f"  ✎ {path} ({content.count(chr(10))+1} строк)")
                     self.stats["files_modified"].append(path)
-                    print_file_action('modify', path, f"({content.count(chr(10))+1} lines)")
                 self.stream_buffer = self.stream_buffer[match.end():]
             else: break
+
+        # INSTALL
+        while True:
+            match = re.search(r'\[\[INSTALL:(.+?)\]\]', self.stream_buffer)
+            if match:
+                package = match.group(1).strip()
+                print_status(f"Установка пакета: {package}")
+                self.file_manager.install_package(package)
+                self.stream_buffer = self.stream_buffer[match.end():]
+            else: break
+
+        # EXEC
         while True:
             match = re.search(r'\[\[EXEC:(.+?)\]\]', self.stream_buffer)
             if match:
@@ -322,7 +364,7 @@ Speak Russian. Write code in English."""
                                     if '[[END]]' in content:
                                         in_code = False
                                     if not in_code:
-                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '').replace(']]', '')
+                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '').replace('[[INSTALL:', '').replace(']]', '')
                                         if clean.strip():
                                             print(clean, end="", flush=True)
                                     self._process_stream_chunk(content)
@@ -360,7 +402,7 @@ Speak Russian. Write code in English."""
                                     if '[[END]]' in content:
                                         in_code = False
                                     if not in_code:
-                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '').replace(']]', '')
+                                        clean = content.replace('[[CREATE:', '').replace('[[MODIFY:', '').replace('[[END]]', '').replace('[[EXEC:', '').replace('[[INSTALL:', '').replace(']]', '')
                                         if clean.strip():
                                             print(clean, end="", flush=True)
                                     self._process_stream_chunk(content)
@@ -409,8 +451,26 @@ Speak Russian. Write code in English."""
                         for cmd in selected_commands:
                             if self.security.is_safe_command(cmd):
                                 print_status(f"Выполняется: {cmd}")
-                                self.file_manager.execute_command(cmd)
+                                success, output = self.file_manager.execute_command(cmd)
                                 self.stats["commands_executed"].append(cmd)
+                                self.command_results.append({
+                                    "command": cmd,
+                                    "success": success,
+                                    "output": output
+                                })
+
+                        # Показываем ошибки
+                        errors = [r for r in self.command_results if not r['success']]
+                        if errors:
+                            print()
+                            print_section("❌ Обнаружены ошибки", [])
+                            for err in errors:
+                                print(colorize(f"  Команда: {err['command']}", Theme.ERROR))
+                                if err['output']:
+                                    for line in err['output'].strip().split('\n')[:5]:
+                                        print(colorize(f"    {line}", Theme.MUTED))
+                            print()
+                            print_info("Вы можете попросить меня исправить ошибки")
                     else:
                         print_warning("Команды пропущены")
 
@@ -426,6 +486,7 @@ Speak Russian. Write code in English."""
             print_box([
                 "/help      Справка",
                 "/scan      Показать проект",
+                "/packages  Показать установленные пакеты",
                 "/models    Модели",
                 "/model N   Сменить модель",
                 "/clear     Очистить историю",
@@ -435,6 +496,11 @@ Speak Russian. Write code in English."""
             ], Theme.PRIMARY)
         elif cmd in ['/scan', '/s']:
             print(self.file_manager.scan_project())
+        elif cmd in ['/packages', '/pkg']:
+            packages = self.file_manager.get_installed_packages()
+            print_section("📦 Установленные пакеты", packages[:20])
+            if len(packages) > 20:
+                print(colorize(f"  ... и ещё {len(packages) - 20}", Theme.MUTED))
         elif cmd in ['/models', '/m']:
             lines = []
             for name, mid in MODELS.items():
@@ -449,14 +515,18 @@ Speak Russian. Write code in English."""
                 print_success(f"Модель изменена на {name}")
         elif cmd in ['/clear', '/c']:
             self.conversation_history = [self.conversation_history[0]]
+            self.command_results = []
             print_success("История очищена")
+        elif cmd in ['/save']:
+            self.file_manager.save_session(self.conversation_history, self.current_model, self.stats)
         elif cmd in ['/stats']:
             print_box([
                 f"Сообщений: {self.stats['messages_sent']}",
                 f"Создано файлов: {len(self.stats['files_created'])}",
                 f"Изменено: {len(self.stats['files_modified'])}",
                 f"Удалено: {len(self.stats['files_deleted'])}",
-                f"Команд выполнено: {len(self.stats['commands_executed'])}"
+                f"Команд выполнено: {len(self.stats['commands_executed'])}",
+                f"Пакетов установлено: {len(self.installed_packages)}"
             ], Theme.SECONDARY)
         elif cmd in ['/exit', '/q']:
             print_success("До свидания!")
@@ -471,6 +541,7 @@ Speak Russian. Write code in English."""
         print_divider("─", 60, Theme.MUTED)
         print(colorize(f"  📁 Проект: {self.project_path}", Theme.TEXT))
         print(colorize(f"  🤖 Модель: {self.current_model}", Theme.TEXT))
+        print(colorize(f"  📦 Пакетов: {len(self.installed_packages)}", Theme.TEXT))
         print(colorize(f"  {Theme.MUTED}/help для команд{Colors.RESET}", Theme.MUTED))
         print_divider("─", 60, Theme.MUTED)
         print()
