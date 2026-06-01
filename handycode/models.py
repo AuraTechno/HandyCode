@@ -34,40 +34,50 @@ MODELS = {
 
 MODEL_SETTINGS = {
     "deepseek/deepseek-chat": {
-        "temperature": 1,
+        "temperature": 0.3,
         "max_tokens": 8000,
-        "description": "DeepSeek V3 - Лучший баланс скорости и качества"
+        "description": "DeepSeek V3 - Универсальный (точный код)"
     },
     "deepseek/deepseek-coder": {
-        "temperature": 1,
+        "temperature": 0.1,
         "max_tokens": 8000,
-        "description": "DeepSeek Coder - Специализирована для написания кода"
+        "description": "DeepSeek Coder - Код (макс. точность)"
     },
     "deepseek/deepseek-r1": {
-        "temperature": 1,
+        "temperature": 0.5,
         "max_tokens": 4000,
-        "description": "DeepSeek R1 - Глубокое мышление и анализ"
+        "description": "DeepSeek R1 - Анализ и архитектура"
     },
     "openai/gpt-4-turbo-preview": {
         "temperature": 0.3,
         "max_tokens": 4000,
-        "description": "GPT-4 Turbo - Мощная универсальная модель"
+        "description": "GPT-4 Turbo"
     },
     "anthropic/claude-3-opus": {
         "temperature": 0.3,
         "max_tokens": 4000,
-        "description": "Claude 3 Opus - Продвинутый анализ"
+        "description": "Claude 3 Opus"
     },
     "anthropic/claude-3-sonnet": {
+        "temperature": 0.2,
+        "max_tokens": 4000,
+        "description": "Claude 3 Sonnet"
+    },
+    "google/gemini-pro": {
+        "temperature": 0.4,
+        "max_tokens": 4000,
+        "description": "Gemini Pro"
+    },
+    "meta-llama/llama-3-70b-instruct": {
         "temperature": 0.3,
         "max_tokens": 4000,
-        "description": "Claude 3 Sonnet - Быстрая и способная"
+        "description": "Llama 3 70B"
     },
 }
 
 DEFAULT_SETTINGS = {
     "temperature": 0.3,
-    "max_tokens": 4000,
+    "max_tokens": 8000,
     "description": "Универсальная модель"
 }
 
