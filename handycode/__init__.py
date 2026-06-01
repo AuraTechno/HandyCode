@@ -3,7 +3,7 @@ HandyCode - AI Ассистент для разработки
 Аналог Claude Code для командной строки
 """
 
-__version__ = "1.0.0"
+__version__ = "2.1.1"
 __author__ = "AURA Tec."
 __license__ = "MIT"
 
