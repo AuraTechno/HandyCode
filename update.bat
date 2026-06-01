@@ -1,77 +1,209 @@
 @echo off
 chcp 65001 >nul 2>&1
+setlocal enabledelayedexpansion
+
+set LOG_FILE=%TEMP%\handycode_update_log.txt
+echo HandyCode Update Log > "%LOG_FILE%"
+echo Date: %DATE% %TIME% >> "%LOG_FILE%"
+echo. >> "%LOG_FILE%"
+
 echo.
 echo ╔══════════════════════════════════════════════════════╗
 echo ║           HANDYCODE - ОБНОВЛЕНИЕ                     ║
 echo ╚══════════════════════════════════════════════════════╝
 echo.
-
-echo [*] Обновление HandyCode...
+echo Лог: %LOG_FILE%
 echo.
+
+:: Проверка Python
+echo [1/4] Проверка Python...
+echo [1/4] Checking Python... >> "%LOG_FILE%"
+
+where python >nul 2>nul
+if %errorlevel% equ 0 set PYTHON_CMD=python & goto :python_found
+where python3 >nul 2>nul
+if %errorlevel% equ 0 set PYTHON_CMD=python3 & goto :python_found
+where py >nul 2>nul
+if %errorlevel% equ 0 set PYTHON_CMD=py & goto :python_found
+
+echo [ERROR] Python не найден
+echo [ERROR] Python not found >> "%LOG_FILE%"
+goto :error_exit
+
+:python_found
+for /f "tokens=2" %%i in ('%PYTHON_CMD% --version 2^>^&1') do (
+    echo [OK] Python %%i
+    echo [OK] Python %%i >> "%LOG_FILE%"
+)
+
+:: Проверка текущей версии
+echo [2/4] Проверка текущей версии...
+echo [2/4] Checking current version... >> "%LOG_FILE%"
+
+%PYTHON_CMD% -c "import handycode; print(handycode.__version__)" 2>nul
+if %errorlevel% equ 0 (
+    for /f %%i in ('%PYTHON_CMD% -c "import handycode; print(handycode.__version__)" 2^>^&1') do (
+        echo [OK] Текущая версия: %%i
+        echo [OK] Current version: %%i >> "%LOG_FILE%"
+        set OLD_VERSION=%%i
+    )
+) else (
+    echo [--] HandyCode не установлен
+    echo [--] HandyCode not installed >> "%LOG_FILE%"
+    echo.
+    echo HandyCode не найден. Сначала установите: install.bat
+    goto :error_exit
+)
+
+:: Обновление
+echo [3/4] Обновление HandyCode...
+echo [3/4] Updating HandyCode... >> "%LOG_FILE%"
+
+set UPDATE_OK=0
 
 :: Способ 1: pip из GitHub
-echo [1] Пробую обновить через pip...
-pip install --upgrade --force-reinstall --no-cache-dir git+https://github.com/WiteRive/HandyCode.git
-
+echo [*] Способ 1: pip install из GitHub...
+echo [*] Method 1: pip from GitHub >> "%LOG_FILE%"
+%PYTHON_CMD% -m pip install --upgrade --force-reinstall --no-cache-dir git+https://github.com/AuraTechno/HandyCode.git >> "%LOG_FILE%" 2>&1
 if %errorlevel% equ 0 (
+    echo [OK] Обновлено из GitHub
+    echo [OK] Updated from GitHub >> "%LOG_FILE%"
+    set UPDATE_OK=1
+    goto :verify_update
+)
+echo [--] Не удалось
+echo [--] GitHub method failed >> "%LOG_FILE%"
+
+:: Способ 2: pip из PyPI
+echo [*] Способ 2: pip install из PyPI...
+echo [*] Method 2: pip from PyPI >> "%LOG_FILE%"
+%PYTHON_CMD% -m pip install --upgrade --force-reinstall --no-cache-dir handycode >> "%LOG_FILE%" 2>&1
+if %errorlevel% equ 0 (
+    echo [OK] Обновлено из PyPI
+    echo [OK] Updated from PyPI >> "%LOG_FILE%"
+    set UPDATE_OK=1
+    goto :verify_update
+)
+echo [--] Не удалось
+echo [--] PyPI method failed >> "%LOG_FILE%"
+
+:: Способ 3: Очистка кэша и повтор
+echo [*] Способ 3: Очистка кэша и повтор...
+echo [*] Method 3: Clear cache and retry >> "%LOG_FILE%"
+%PYTHON_CMD% -m pip cache purge >> "%LOG_FILE%" 2>&1
+%PYTHON_CMD% -m pip install --upgrade --force-reinstall --no-cache-dir handycode >> "%LOG_FILE%" 2>&1
+if %errorlevel% equ 0 (
+    echo [OK] Обновлено после очистки кэша
+    echo [OK] Updated after cache purge >> "%LOG_FILE%"
+    set UPDATE_OK=1
+    goto :verify_update
+)
+echo [--] Не удалось
+echo [--] Cache purge method failed >> "%LOG_FILE%"
+
+:verify_update
+if %UPDATE_OK%==0 (
     echo.
-    echo [OK] HandyCode обновлён!
-    goto :done
+    echo [ERROR] Не удалось обновить HandyCode
+    echo [ERROR] Update failed >> "%LOG_FILE%"
+    goto :error_exit
 )
 
-:: Способ 2: Клонирование и установка
-echo [2] Пробую через git clone...
-set TEMP_DIR=%TEMP%\handycode_update
+:: Проверка новой версии
+echo [4/4] Проверка обновления...
+echo [4/4] Verifying update... >> "%LOG_FILE%"
 
-if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%"
-git clone https://github.com/WiteRive/HandyCode.git "%TEMP_DIR%" 2>nul
-
-if exist "%TEMP_DIR%\setup.py" (
-    cd /d "%TEMP_DIR%"
-    pip install --upgrade --force-reinstall --no-cache-dir -e .
-    cd /d %USERPROFILE%
-    if %errorlevel% equ 0 (
-        echo.
-        echo [OK] HandyCode обновлён!
-        goto :done
+%PYTHON_CMD% -c "import handycode; print(handycode.__version__)" 2>nul
+if %errorlevel% equ 0 (
+    for /f %%i in ('%PYTHON_CMD% -c "import handycode; print(handycode.__version__)" 2^>^&1') do (
+        echo [OK] Новая версия: %%i
+        echo [OK] New version: %%i >> "%LOG_FILE%"
+        set NEW_VERSION=%%i
     )
+) else (
+    echo [ERROR] Проверка не пройдена
+    echo [ERROR] Verification failed >> "%LOG_FILE%"
+    goto :error_exit
 )
 
-:: Способ 3: Скачивание файлов напрямую
-echo [3] Пробую обновить файлы напрямую...
-
-for /f "tokens=*" %%i in ('python -c "import handycode, os; print(os.path.dirname(handycode.__file__))" 2^>^&1') do set HC_DIR=%%i
-
-if exist "%HC_DIR%" (
-    echo [*] Папка HandyCode: %HC_DIR%
-
-    set BASE_URL=https://raw.githubusercontent.com/WiteRive/HandyCode/main/handycode
-    set FILES=__init__.py __main__.py main.py cli.py assistant.py models.py file_manager.py security.py config.py utils.py logo.py project_templates.py
-
-    for %%f in (%FILES%) do (
-        echo [*] Обновляю %%f...
-        curl -s -L -o "%HC_DIR%\%%f" "!BASE_URL!/%%f" 2>nul
-        if exist "%HC_DIR%\%%f" (
-            echo   [OK] %%f
-        ) else (
-            echo   [--] %%f не обновлён
-        )
-    )
-
+:: Сравнение версий
+if "%OLD_VERSION%"=="%NEW_VERSION%" (
     echo.
-    echo [OK] Файлы обновлены!
-    goto :done
+    echo [!] Версия не изменилась: %NEW_VERSION%
+    echo [!] Version unchanged: %NEW_VERSION% >> "%LOG_FILE%"
+    echo.
+    echo Возможно, новых обновлений нет.
+) else (
+    echo.
+    echo [OK] Обновление успешно!
+    echo [OK] Update successful >> "%LOG_FILE%"
+    echo.
+    echo   %OLD_VERSION% → %NEW_VERSION%
 )
 
-echo [ERROR] Не удалось обновить HandyCode
-pause
+:: Обновление скриптов запуска
+echo [*] Обновление скриптов запуска...
+echo [*] Updating launcher scripts >> "%LOG_FILE%"
+
+set BIN_DIR=%USERPROFILE%\.local\bin
+
+if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
+
+(
+echo @echo off
+echo %PYTHON_CMD% -m handycode %%*
+) > "%BIN_DIR%\hc.bat"
+
+(
+echo @echo off
+echo %PYTHON_CMD% -m handycode %%*
+) > "%BIN_DIR%\handycode.bat"
+
+echo [OK] Скрипты обновлены
+echo [OK] Scripts updated >> "%LOG_FILE%"
+
+:: Успешное завершение
+echo.
+echo ╔══════════════════════════════════════════════════════════╗
+echo ║                                                        ║
+echo ║              ✅ HANDYCODE ОБНОВЛЁН                      ║
+echo ║                 v%NEW_VERSION%                                  ║
+echo ║                                                        ║
+echo ╚══════════════════════════════════════════════════════════╝
+echo.
+
+if not "%OLD_VERSION%"=="%NEW_VERSION%" (
+    echo Изменения:
+    echo   • Обновлены файлы пакета
+    echo   • Обновлены скрипты запуска
+    echo   • Очищен кэш pip
+)
+
+echo.
+echo Лог обновления: %LOG_FILE%
+echo.
+echo Нажмите любую клавишу для выхода...
+pause >nul
+exit /b 0
+
+:error_exit
+echo.
+echo ╔══════════════════════════════════════════════════════════╗
+echo ║                                                        ║
+echo ║              ❌ ОБНОВЛЕНИЕ НЕ УДАЛОСЬ                   ║
+echo ║                                                        ║
+echo ╚══════════════════════════════════════════════════════════╝
+echo.
+echo Содержимое лога:
+echo ========================================
+type "%LOG_FILE%"
+echo ========================================
+echo.
+echo Попробуйте вручную:
+echo   %PYTHON_CMD% -m pip install --upgrade --force-reinstall --no-cache-dir git+https://github.com/AuraTechno/HandyCode.git
+echo.
+echo Лог сохранён: %LOG_FILE%
+echo.
+echo Нажмите любую клавишу для выхода...
+pause >nul
 exit /b 1
-
-:done
-echo.
-echo Проверка версии...
-python -c "import handycode; print('HandyCode v' + handycode.__version__)"
-echo.
-echo Готово! Запустите hc для проверки.
-echo.
-pause
